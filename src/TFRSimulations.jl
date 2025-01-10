@@ -78,16 +78,16 @@ function simulate(f::Function, θ, u₀; tspan=TSPAN, n_tp=501, stop=:auto, min_
   prob = ODEProblem(f, u₀, tspan, θ)
   # detect if steady state is reached
   if stop == :auto
-    t_end = isnothing(min_t) ? 1.0 : float(min_t)
-    sol = solve(prob, alg, reltol=1e-9, abstol=1e-9, callback=TerminateSteadyState(min_t=min_t))
+    t_end = isnothing(min_t) ? tspan[1] + 1.0 : float(min_t)
+    sol = solve(prob, alg, callback=TerminateSteadyState(min_t=min_t))
     t_end = max(t_end, round(sol.t[end], digits=1))
     # remake problem
     tspan = (tspan[1], t_end) 
     prob =  remake(prob, tspan=tspan)
   end
   # save solution in optimal time range with given resolution
-  sol = solve(prob, alg, saveat=LinRange(tspan[1], tspan[2], n_tp), reltol=1e-9, abstol=1e-9)
-  return sol, tspan
+  sol = solve(prob, alg, saveat=LinRange(tspan[1], tspan[2], n_tp))
+  return sol
 end
 
 
@@ -197,15 +197,14 @@ function gui(reduction::TikhonovFenichelReductions.Reduction,
   _u₀_slow_manifold = @lift update_initial_condition($_u₀, $_p)
 
   on(start_on_M_btn.clicks) do clicks
-    println("slow manifold: $(_u₀_slow_manifold[])")
+    # println("slow manifold: $(_u₀_slow_manifold[])")
     for i in eachindex(_u₀_slow_manifold[])
       set_close_to!(lsgrid.sliders[length(p)+i], _u₀_slow_manifold[][i])
     end
   end
   
   # ODE solution
-  sim = @lift simulate(f!, $_p, $_u₀; stop=$stop_simulate, tspan=$_tspan, alg=ODE_ALG, n_tp=n_tp);
-  sol = @lift $(sim)[1]
+  sol = @lift simulate(f!, $_p, $_u₀; stop=$stop_simulate, tspan=$_tspan, alg=ODE_ALG, n_tp=n_tp);
   default_colors = length(x0)<=7 ? Makie.wong_colors() : :tab20
   colors = length(colors) == 0 ? default_colors : colors
   labels = length(labels) == 0 ? name_components : labels
