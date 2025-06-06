@@ -11,7 +11,7 @@ simgui(reduction)
 ```
 to get a simple GUI that allows to investigate the behaviour of the reduced
 system (together with the original one):
-![GUI with an example](https://github.com/jo-ap/TFRSimulations/example.png)
+![GUI with an example](https://github.com/jo-ap/TFRSimulations/blob/main/example.png)
 The example shows the reduction corresponding to the MacArthur-Rosenzweig model,
 as demonstrated
 [here](https://jo-ap.github.io/TikhonovFenichelReductions.jl/stable/gettingstarted/).
