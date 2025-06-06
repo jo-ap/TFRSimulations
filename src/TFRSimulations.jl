@@ -112,7 +112,7 @@ end
 function simgui(
     reduction::Reduction;
     x0::Vector{Float64}=ones(Float64, length(reduction.problem.x)),
-    p::Vector{Float64}=abs(randn(length(reduction.problem.p))),
+    p::Vector{Float64}=abs.(randn(length(reduction.problem.p))),
     include_full_system::Bool=true,
     colors=default_colors(length(reduction.problem.x)),
     slider_range::Union{Vector{<:AbstractVector}, AbstractVector}=SLIDER_RANGE,
