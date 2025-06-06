@@ -1,164 +1,163 @@
 module TFRSimulations
 
-import Oscar
-
+using Colors
+using ColorSchemes
 using DifferentialEquations 
 using GLMakie
-using TikhonovFenichelReductions
 using Latexify
 using LaTeXStrings
+using RuntimeGeneratedFunctions
+using TikhonovFenichelReductions
+import Oscar: FracFieldElem, QQMPolyRingElem
+
+RuntimeGeneratedFunctions.init(@__MODULE__)
 
 ## export
 
-export gui
+export simgui
 
 ## globals 
 
-# default range for sliders 
-SLIDER_RANGE = LinRange(0, 10, 101)
-# max time span for auto detection of steady state
-TSPAN = (0.0, 1000.0);
-# minimum time to integrate (until steady state can be detected and integration stopped)
-MIN_T = 5
+# default settings
+# size for Makie plots
+const FIG_SIZE = (800,600)
+# range for sliders 
+const SLIDER_RANGE = LinRange(0, 10, 101)
+# format value of slider
+const SLIDER_FORMAT = x -> "$(round(x; digits=1))"
 # number of time points for time series plot
-N_TP = 1000
-# font size for labels in legend
-LABEL_FS = 15
+const N_TP = 500
 # algorithm for ode solver
-ODE_ALG = AutoTsit5(Rosenbrock23())
+const ODE_ALG = AutoTsit5(Rosenbrock23())
 
-## Generate Julia function from Oscar types
-
-function _eval_poly(u, f) 
-  if f == 0
-    return Float64(0) 
-  else
-    return sum([Float64(c)*prod(u.^a) for (c, a) in Oscar.coefficients_and_exponents(f)]);
-  end
-end
-
-_to_ode_func(g::Oscar.QQMPolyRingElem) = function (du,u,p,t) 
-  du = _eval_poly([u; p],g) 
-  return
-end
-function _to_ode_func(g::Oscar.AbstractAlgebra.Generic.FracFieldElem{Oscar.QQMPolyRingElem})
-  g_num = numerator(g)
-  g_den = denominator(g)
-  return function (du,u,p,t)
-    du = _eval_poly([u;p], g_num)/_eval_poly([u;p], g_den)
-    return
-  end
-end
-function _to_ode_func(g::Union{Vector{Oscar.AbstractAlgebra.Generic.FracFieldElem{Oscar.QQMPolyRingElem}}, Vector{Oscar.QQMPolyRingElem}})
-  p_func = numerator.(g)
-  q_func = denominator.(g)
-  return function (du,u,p,t)
-    du .= [_eval_poly([u;p], _p)/_eval_poly([u;p], _q) for (_p,_q) in zip(p_func, q_func)]
-    return
-  end
-end 
-
-
-_to_func(g::Oscar.QQMPolyRingElem) = (u,p) -> _eval_poly([u; p],g)
-function _to_func(g::Oscar.AbstractAlgebra.Generic.FracFieldElem{Oscar.QQMPolyRingElem})
-  g_num = numerator(g)
-  g_den = denominator(g)
-  (u,p) -> _eval_poly([u;p], g_num)/_eval_poly([u;p], g_den)
-end
-function _to_func(g::Union{Vector{Oscar.AbstractAlgebra.Generic.FracFieldElem{Oscar.QQMPolyRingElem}}, Vector{Oscar.QQMPolyRingElem}})
-  p_func = numerator.(g)
-  q_func = denominator.(g)
-  (u,p) -> [_eval_poly([u;p], _p)/_eval_poly([u;p], _q) for (_p,_q) in zip(p_func, q_func)]
-end 
-
-## Simulate system and plot solution
-
-# simulate ODE system
-function simulate(f::Function, θ, u₀; tspan=TSPAN, n_tp=501, stop=:auto, min_t=nothing, alg=ODE_ALG)
-  prob = ODEProblem(f, u₀, tspan, θ)
-  # detect if steady state is reached
-  if stop == :auto
-    t_end = isnothing(min_t) ? tspan[1] + 1.0 : float(min_t)
-    sol = solve(prob, alg, callback=TerminateSteadyState(min_t=min_t))
-    t_end = max(t_end, round(sol.t[end], digits=1))
-    # remake problem
-    tspan = (tspan[1], t_end) 
-    prob =  remake(prob, tspan=tspan)
-  end
-  # save solution in optimal time range with given resolution
-  sol = solve(prob, alg, saveat=LinRange(tspan[1], tspan[2], n_tp))
-  return sol
-end
-
-
-## GUI
+## GUI for simulations of ODEProblems
 
 # plot ODESolution with series
 Makie.convert_arguments(T::Type{<:Series}, sol::ODESolution) =  Makie.convert_arguments(T, sol.t, hcat(sol.u...))
 
-# pad limits for axis
-function pad_lims(x; padding=0.1, min_range=0.01)
-    m, M = x
-    Δ = M - m + min_range
-    return (m - padding*Δ, M + padding*Δ)
+# get default colors for plot
+function default_colors(n::Int)
+  if n <= 7
+    return Makie.wong_colors()
+  elseif n <= 10
+    return colorschemes[:seaborn_colorblind].colors
+  end
+  return get(colorschemes[:batlow], range(0.0, 1.0, length = n))
+end
+  
+## Generate Julia code from Reduction type and parse to simgui
+
+# build julia function for ODE solver
+function _generate_function_expression(
+    f::Union{Vector{FracFieldElem{QQMPolyRingElem}}, Vector{QQMPolyRingElem}},
+    u::Vector{QQMPolyRingElem},
+    p::Vector{QQMPolyRingElem}
+  )
+  str = "function(du,u,p,t)\n" * 
+    join(string.(u), ", ") * " = u\n" * 
+    join(string.(p), ", ") * " = p\n" *
+    "du .= [\n" *
+    join(string.(f), ",\n") *
+    "\n]\n" *
+    "return nothing\n" * 
+    "end"
+  str = replace(str, "//" => "/")
+  return Meta.parse(str)
+end
+_generate_function_expression(reduction::Reduction) = _generate_function_expression(reduction.g, reduction.problem.x, reduction.problem.p)
+
+function _to_func(
+    M::Union{Vector{FracFieldElem{QQMPolyRingElem}}, Vector{QQMPolyRingElem}},
+    u::Vector{QQMPolyRingElem},
+    p::Vector{QQMPolyRingElem}
+  )
+  str = "function(u,p)\n" * 
+    join(string.(u), ", ") * " = u\n" * 
+    join(string.(p), ", ") * " = p\n" *
+    "return [\n" *
+    join(string.(M), ",\n") *
+    "\n]\n" *
+    "end"
+  str = replace(str, "//" => "/")
+  return Meta.parse(str)
 end
 
 ## GUI for reduction
 
 function idx_small_all(reduction)
-  i_sf = collect(1:length(reduction.idx_slow_fast))[reduction.idx_slow_fast]
+  i_sf = collect(1:length(reduction.problem.p))[reduction.problem.idx_slow_fast]
   return i_sf[.!reduction.sf_separation]
 end
 
-function gui(reduction::TikhonovFenichelReductions.Reduction,
-             g;
-             x0::Vector{Float64}=Float64[],
-             p::Vector{Float64}=Float64[],
-             plotfunction::NamedTuple=NamedTuple(),
-             slider_range=SLIDER_RANGE,
-             alg=ODE_ALG,
-             n_tp=N_TP,
-             min_t=MIN_T,
-             tspan=TSPAN,
-             latexify=true,
-             colors::AbstractVector=[],
-             labels::AbstractVector=[])
+function pad_lims(x; padding=0.1, min_range=0.01)
+  m, M = x
+  Δ = max(M - m, min_range)
+  return (m - padding*Δ, M + padding*Δ)
+end
 
-  # p = isempty(p) ? (; zip([Symbol.(reduction.p)..., :ε], [[1.0 for _ in reduction.p]..., 0.1])...) : (; p..., ε=0.1)
-  # x0 = isempty(x0) ? (; zip(Symbol.(reduction.x), [0.1 for _ in reduction.x])...) : x0
-  p = isempty(p) ? [[1.0 for _ in reduction.p]..., 0.1] : [p...; 0.1]
-  x0 = isempty(x0) ? [0.1 for _ in reduction.x] : x0
-  slider_range = [[slider_range for _ in 1:(length(p)-1)]..., LinRange(0.01,1,100), [slider_range for _ in x0]...]
+function get_axis_lims(sol::ODESolution)
+  t_lims  = (sol.t[1], sol.t[end])
+  y_lims = (minimum(minimum.(sol.u)), maximum(maximum.(sol.u)))
+  return t_lims, y_lims
+end
 
-  # create function for ODE solver
-  f! = _to_ode_func(g)
+function get_axis_lims(sol::ODESolution, sol2::ODESolution)
+  t_lims  = (sol.t[1], sol.t[end])
+  y_lims1 = (minimum(minimum.(sol.u)), maximum(maximum.(sol.u)))
+  y_lims2 = (minimum(minimum.(sol2.u)), maximum(maximum.(sol2.u)))
+  y_lims = (min(y_lims1[1], y_lims2[1]), max(y_lims1[2], y_lims2[2]))
+  return t_lims, y_lims
+end
+
+function simgui(
+    reduction::Reduction;
+    x0::Vector{Float64}=ones(Float64, length(reduction.problem.x)),
+    p::Vector{Float64}=abs(randn(length(reduction.problem.p))),
+    include_full_system::Bool=true,
+    colors=default_colors(length(reduction.problem.x)),
+    slider_range::Union{Vector{<:AbstractVector}, AbstractVector}=SLIDER_RANGE,
+    ode_alg::SciMLBase.AbstractODEAlgorithm=ODE_ALG,
+    n_tp::Int=N_TP,
+    latexify::Bool=false
+  )
 
   # multiply small parameters by ε
   i_small = idx_small_all(reduction)
   function update_parameters(p)
     ε = p[end]
-    __p = p[1:end-1]
-    __p[i_small] .= ε*__p[i_small]
-    return __p
+    _p = p[1:end-1]
+    _p[i_small] .= ε*_p[i_small]
+    return _p
+  end
+
+  # create function for ODE solver
+  f! = @RuntimeGeneratedFunction(_generate_function_expression(reduction))
+  if include_full_system 
+    f_orig! = @RuntimeGeneratedFunction(_generate_function_expression(reduction.problem.f, reduction.problem.x, reduction.problem.p))
   end
 
   # set initial condition on slow manifold
-  update_initial_condition = _to_func(reduction.M)
+  update_initial_condition = @RuntimeGeneratedFunction(_to_func(reduction.M, reduction.problem.x, reduction.problem.p))
   
   # init figure and axes
   fig = Figure(size = (1000, 750));
   ax_sol = Axis(fig[1,1]);
 
   # Sliders
-  p₀ = [p; x0]
-  name_parameters = [string.(reduction.p)..., "ε"]
-  name_components = string.(reduction.x)
+  p₀ = [p..., 0.1, x0...]
+  name_parameters = [string.(reduction.problem.p)..., "ε"]
+  name_components = string.(reduction.problem.x)
   slider_name = [name_parameters; [n * "(0)" for n in name_components]]
   if latexify
     slider_name = Latexify.latexify.(slider_name)
     name_components = Latexify.latexify.(name_components)
   end
-  slider_range = slider_range == [] ? [SLIDER_RANGE for _ in [p, x0]] : slider_range
+  if isa(slider_range, Vector{<:AbstractVector})
+    @assert length(slider_range) == length([p; x0]) "you must either provide a single slider range or one for parameter and state varieble, i.e. a vector with the same length as [p; x0]"
+    slider_range = [slider_range[1:length(p)]..., LinRange(0.01, 1, 100), slider_range[length(p)+1:end]...]
+  else 
+    slider_range = [[slider_range for _ in 1:(length(p))]..., LinRange(0.01,1,100), [slider_range for _ in x0]...]
+  end
   slider = [
     (label = slider_name[i],
       range = slider_range[i],
@@ -176,57 +175,50 @@ function gui(reduction::TikhonovFenichelReductions.Reduction,
     [slvalues...]
   end
   start_on_M_btn = Button(fig, label = "x(0) on slow manifold", tellwidth=false)
-  fig[1,2] = vgrid!(lsgrid, start_on_M_btn)
+  print_parameters_btn = Button(fig, label = "print parameters", tellwidth=false)
+  fig[1,2] = vgrid!(lsgrid, print_parameters_btn, start_on_M_btn)
 
   # Time slider
-  time_grid = SliderGrid(fig, (label = L"T_{max}", range = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000], format = x->"$x"))
+  time_grid = SliderGrid(fig[2,1], (label = L"T_{max}", range = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 20_000, 50_000], format = x->"$x"))
   T_end = time_grid.sliders[1].value
-  T_toggle = Toggle(fig, active = true)
-  T_toggle_active = T_toggle.active
-  T_label = Label(fig, "detect steady state")
-  fig[2,1] = hgrid!(
-    time_grid, T_toggle, T_label
-  )
-  stop_simulate = @lift $T_toggle_active ? :auto : :no
-  _tspan = @lift $T_toggle_active ? tspan : (0.0, Float64($T_end))
+  _tspan = @lift (0.0, Float64($T_end))
 
   # Simulation
   # unpack parameters and initial conditions
-  _p = @lift update_parameters($(slider_params)[1:length(p)])
-  _u₀ = @lift $(slider_params)[(length(p)+1):end]
+  _p = @lift update_parameters($(slider_params)[1:length(p)+1])
+  _u₀ = @lift $(slider_params)[(length(p)+2):end]
   _u₀_slow_manifold = @lift update_initial_condition($_u₀, $_p)
 
   on(start_on_M_btn.clicks) do clicks
-    # println("slow manifold: $(_u₀_slow_manifold[])")
     for i in eachindex(_u₀_slow_manifold[])
-      set_close_to!(lsgrid.sliders[length(p)+i], _u₀_slow_manifold[][i])
+      set_close_to!(lsgrid.sliders[length(p)+1+i], _u₀_slow_manifold[][i])
     end
   end
+  on(print_parameters_btn.clicks) do clicks 
+    println("p = " * string(slider_params[][1:length(p)]))
+    println("u₀ = " * string(slider_params[][length(p)+2:end]))
+  end
   
-  # ODE solution
-  sol = @lift simulate(f!, $_p, $_u₀; stop=$stop_simulate, tspan=$_tspan, alg=ODE_ALG, n_tp=n_tp);
-  default_colors = length(x0)<=7 ? Makie.wong_colors() : :tab20
-  colors = length(colors) == 0 ? default_colors : colors
-  labels = length(labels) == 0 ? name_components : labels
- 
-  series!(ax_sol, sol; linewidth=2, labels=labels, color=colors)
- 
-  # # add plot function
-  # if length(plotfunction) > 0
-  #   _g = @lift plotfunction.g($(sol).u, $_p, $(sol).t, $idx_fp)
-  #   _t = @lift $(_g)[1]
-  #   _M = @lift $(_g)[2]
-  #   _colors = haskey(plotfunction, :colors) == 0 ? default_colors : plotfunction.colors
-  #   _labels = haskey(plotfunction, :labels) == 0 ? name_components : plotfunction.labels
-  #   _ls = haskey(plotfunction, :linestyle) == 0 ? :dot : plotfunction.linestyle
-  #   series!(ax_sol, _t, _M; linewidth=2, linestyle=_ls, labels=_labels, color=_colors)
-  # end
+  # ODE solution (reduction)
+  ode_problem = @lift ODEProblem(f!, $_u₀, $_tspan, $_p)
+  sol = @lift solve($ode_problem, alg=ode_alg; saveat=LinRange(0, $T_end, n_tp)) 
+  series!(ax_sol, sol; linewidth=3, labels=name_components, color=colors)
   axislegend(ax_sol)
+  
+  # include solution of full system
+  if include_full_system 
+    ode_problem_full = @lift ODEProblem(f_orig!, $_u₀, $_tspan, $_p)
+    sol_full = @lift solve($ode_problem_full, alg=ode_alg; saveat=LinRange(0, $T_end, n_tp)) 
+    series!(ax_sol, sol_full; linewidth=3, color=colors, linestyle=:dot)
+    axis_lims = @lift get_axis_lims($sol, $sol_full)
+  else
+    axis_lims = @lift get_axis_lims($sol)
+  end
 
   # update limits
-  on(sol) do sol
-    x_lims = pad_lims((sol.t[1], sol.t[end]))
-    y_lims = pad_lims((minimum(minimum.(sol.u)), maximum(maximum.(sol.u))))
+  on(axis_lims) do axis_lims
+    x_lims = pad_lims(axis_lims[1])
+    y_lims = pad_lims(axis_lims[2])
     # if solutions explode, upper limits can become inf 
     # in that case the corresponding lines can leave the axis
     if any(isinf.(Float32.(y_lims)))
@@ -243,7 +235,6 @@ function gui(reduction::TikhonovFenichelReductions.Reduction,
   # layout
   rowgap!(lsgrid.layout, 7)
   colsize!(fig.layout, 1, Relative(2/3))
-  # colsize!(fig.layout, 3, Relative(1/3))
   
   return fig
 end
